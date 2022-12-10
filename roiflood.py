@@ -5,8 +5,8 @@ from typing import Any, ParamSpecKwargs, Callable, Concatenate, Iterable, Litera
 from numpy.typing import NDArray
 import numpy as np
 from skimage.io import imread, imshow, imsave
-from skimage.draw import line, polygon_perimeter, line_nd
-# from skimage.segmentation import flood
+from skimage.draw import line_nd
+from skimage.segmentation import flood as skflood
 
 
 def flood(
@@ -72,7 +72,7 @@ def flood_along_points(
 
 	"""
 	dims = len(seed_points)
-	assert dims == img.ndim
+	assert dims == image.ndim
 	n_points = np.min([len(coords) for coords in seed_points if coords is not None])
 	# seed_points2: list[tuple[int, ...]] = [seed_points[d][0: n_points] for d in range(dims) if seed_points[d] is not None]
 	point_indexes: Iterable[tuple[int | slice, ...]] = zip(*[
@@ -86,14 +86,15 @@ def flood_along_points(
 		if seed_points[d] is not None
 	])
 	selection_shape: list[int] = [
-		img.shape[d]
+		image.shape[d]
 		for d in range(dims)
 		if seed_points[d] is not None
 	]
 	selection = np.zeros(selection_shape, np.ubyte)
 	for img_p, sel_p in zip(point_indexes, selection_point_indexes):
-		if planting_condition(img_p, img[*img_p]) and selection[*sel_p] == 0:
-			selection |= flood_func(img, img_p, **kwargs)
+		if planting_condition(img_p, image[*img_p]) and selection[*sel_p] == 0:
+			selection |= flood_func(image, img_p, **kwargs)
+	return selection
 
 
 def linepath_coords(
@@ -101,7 +102,7 @@ def linepath_coords(
 		Annotated[list[int], "[p0_x, p0_y, p0_z, p1_x, p1_y, p1_z, p2_x, p2_y, p2_z, ...]"]
 		| Annotated[list[list[int]], "[(p0_x, p0_y, p0_z), (p1_x, p1_y, p1_z), (p2_x, p2_y, p2_z), ... ]"],
 	dimensions: int
-) -> Annotated[list[NDArray], "[(p0_x, p0.1_x, p0.2_x, ..., p1_x, p1.1_x, ..., p2_x, p2.1_x, ...), (p0_y, p0.1_y, ...), (p0_z, p0.1_z, ...)]"]:
+) -> Annotated[list[NDArray[np.int32]], "[(p0_x, p0.1_x, p0.2_x, ..., p1_x, p1.1_x, ..., p2_x, p2.1_x, ...), (p0_y, p0.1_y, ...), (p0_z, p0.1_z, ...)]"]:
 	points: list[list[int]]
 	if isinstance(flat_points[0], (int, float)):
 		# we've got to split the flat array of concatenated coords into an array of tuples of point-coords
@@ -117,41 +118,40 @@ def linepath_coords(
 		this_line_coords: tuple[NDArray, ...] = line_nd(points[p - 1], points[p], endpoint=(p == n_points - 1))
 		for d in range(dimensions):
 			line_coords[d].append(this_line_coords[d])
-	line_coords_joined: list[NDArray] = [np.concatenate(line_coords[d]) for d in range(dimensions)]
+	line_coords_joined: list[NDArray[np.int32]] = [np.concatenate(line_coords[d]) for d in range(dimensions)]
 	return line_coords_joined
 
 
-polygon_coords = [180, 3100, 1130, 3950, 1740, 3920, 1900, 3670]
-polygon_coordsyx = [3100, 180, 3950, 1130, 3920, 1740, 3670, 1900]
+polygon_coords_yx = [3100, 180, 3950, 1130, 3920, 1740, 3670, 1900]
 upper_color = [200, 200, 200]
 lower_color = [180, 180, 180]
 
 
-def seeding_condition(y: int, x: int, color: tuple[int, int, int]):
+def seeding_condition(yx: tuple[int, int], color: tuple[int, int, int]):
 	if np.all(np.greater(color, lower_color)) and np.all(np.greater(upper_color, color)):
+		return True
+	return False
+
+
+def seeding_condition2(yx: tuple[int, int], color: int):
+	if color > 180 and color < 200:
 		return True
 	return False
 
 
 img = imread("./q2,n20-242.jpg")
 
-xc = polygon_coords[::2]
-yc = polygon_coords[1::2]
-rrs: list[NDArray] = []
-ccs: list[NDArray] = []
-for i in range(1, len(xc)):
-	rs, cs = line(yc[i - 1], xc[i - 1], yc[i], xc[i])
-	rrs.append(rs)
-	ccs.append(cs)
-rr: NDArray = np.concatenate(rrs)
-cc: NDArray = np.concatenate(ccs)
-del rrs, ccs
-selection = np.zeros((img.shape[0], img.shape[1]), np.ubyte,)
-count = 0
+# yxc_coords: list[NDArray[np.int32] | None] = linepath_coords(polygon_coords_yx, 2) + [None,]
+# flood_along_points(img, yxc_coords, seeding_condition, skflood, tolerance=5)
+yx_coords = linepath_coords(polygon_coords_yx, 2)
+selection0 = flood_along_points(img[:, :, 0], yx_coords, seeding_condition2, skflood, tolerance=5)
+selection1 = flood_along_points(img[:, :, 1], yx_coords, seeding_condition2, skflood, tolerance=5)
+selection2 = flood_along_points(img[:, :, 2], yx_coords, seeding_condition2, skflood, tolerance=5)
+
 for y, x in zip(rr, cc):
 	if seeding_condition(y, x, img[y, x]) and selection[y, x] == 0:
 		count += 1
 		selection |= flood(img[:, :, 0], (y, x), tolerance=5) & flood(img[:, :, 1], (y, x), tolerance=5) & flood(img[:, :, 2], (y, x), tolerance=5)
 
-imshow(selection)
-imsave("./roi.png", selection)
+imshow(selection0 & selection1 & selection2)
+imsave("./roi.png", selection0 & selection1 & selection2)
