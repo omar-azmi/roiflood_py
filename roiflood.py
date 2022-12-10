@@ -1,11 +1,11 @@
 """provides tools for selecting region-of-interest (roi) on PIL images"""
 __version__ = "0.1.0"
 
-from typing import Any, Callable, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
+from typing import Any, ParamSpecKwargs, Callable, Concatenate, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
 from numpy.typing import NDArray
 import numpy as np
 from skimage.io import imread, imshow, imsave
-from skimage.draw import line, polygon_perimeter
+from skimage.draw import line, polygon_perimeter, line_nd
 # from skimage.segmentation import flood
 
 
@@ -21,8 +21,14 @@ def flood(
 
 ValueAtPoint: TypeAlias = int | NDArray
 PointIndex: TypeAlias = tuple[int, ...]  # N-dimesional point
+CoordIndex: TypeAlias = list[tuple[int, ...]]  # N-dimesional list of P-point coordinates in bundled in tuples (coordinate wise)
 PlantingCondition: TypeAlias = Callable[[PointIndex, ValueAtPoint], bool]
-FloodFunc: TypeAlias = Callable[[Annotated[NDArray, "image ndarray"], Annotated[PointIndex, "point-index or slice of image"]], NDArray[np.uint8] | NDArray[np.bool8]]
+FloodFunc_kwargs = ParamSpec("FloodFunc_kwargs")
+FloodFunc: TypeAlias = Callable[Concatenate[
+	Annotated[NDArray, "image ndarray"],
+	Annotated[PointIndex, "point-index or slice of image"],
+	FloodFunc_kwargs
+], NDArray[np.uint8] | NDArray[np.bool8]]
 
 
 def flood_along_points(
@@ -30,7 +36,7 @@ def flood_along_points(
 	seed_points: Annotated[tuple[tuple[int, ...] | None, ...], "list of P-points of ith-coordinates"],
 	planting_condition: PlantingCondition,
 	flood_func: FloodFunc,
-	**kwargs: Annotated[Any, "flood_func.params.kwargs"]
+	**kwargs: Annotated[FloodFunc_kwargs, "flood_func.params.kwargs"]
 ):
 	"""_summary_
 
@@ -90,7 +96,33 @@ def flood_along_points(
 			selection |= flood_func(img, img_p, **kwargs)
 
 
+def linepath_coords(
+	flat_points:
+		Annotated[list[int], "[p0_x, p0_y, p0_z, p1_x, p1_y, p1_z, p2_x, p2_y, p2_z, ...]"]
+		| Annotated[list[list[int]], "[(p0_x, p0_y, p0_z), (p1_x, p1_y, p1_z), (p2_x, p2_y, p2_z), ... ]"],
+	dimensions: int
+) -> Annotated[list[NDArray], "[(p0_x, p0.1_x, p0.2_x, ..., p1_x, p1.1_x, ..., p2_x, p2.1_x, ...), (p0_y, p0.1_y, ...), (p0_z, p0.1_z, ...)]"]:
+	points: list[list[int]]
+	if isinstance(flat_points[0], (int, float)):
+		# we've got to split the flat array of concatenated coords into an array of tuples of point-coords
+		points = [flat_points[i:i + dimensions] for i in range(0, len(flat_points) - dimensions + 1, dimensions)]
+	else:
+		# flat_points is not actually flat, rather it's of the kind:
+		# [(p0_x, p0_y, p0_z, ...), (p1_x, p1_y, p1_z, ...), (p2_x, p2_y, p2_z, ...), ... ]
+		# which is the exact format we wanted to convert our points to
+		points = flat_points
+	n_points = len(points)
+	line_coords: list[list[NDArray]] = [[] for d in range(dimensions)]
+	for p in range(1, n_points):
+		this_line_coords: tuple[NDArray, ...] = line_nd(points[p - 1], points[p], endpoint=(p == n_points - 1))
+		for d in range(dimensions):
+			line_coords[d].append(this_line_coords[d])
+	line_coords_joined: list[NDArray] = [np.concatenate(line_coords[d]) for d in range(dimensions)]
+	return line_coords_joined
+
+
 polygon_coords = [180, 3100, 1130, 3950, 1740, 3920, 1900, 3670]
+polygon_coordsyx = [3100, 180, 3950, 1130, 3920, 1740, 3670, 1900]
 upper_color = [200, 200, 200]
 lower_color = [180, 180, 180]
 
@@ -120,7 +152,6 @@ for y, x in zip(rr, cc):
 	if seeding_condition(y, x, img[y, x]) and selection[y, x] == 0:
 		count += 1
 		selection |= flood(img[:, :, 0], (y, x), tolerance=5) & flood(img[:, :, 1], (y, x), tolerance=5) & flood(img[:, :, 2], (y, x), tolerance=5)
-		# selection[y - 5:y + 5, x - 5:x + 5] = 100
 
 imshow(selection)
 imsave("./roi.png", selection)
