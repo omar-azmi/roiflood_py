@@ -1,7 +1,7 @@
 """provides tools for selecting region-of-interest (roi) on PIL images"""
 __version__ = "0.1.0"
 
-from typing import Any, Optional, Generic, Callable, Concatenate, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
+from typing import Any, Iterator, Optional, Generator, Generic, Callable, Concatenate, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
 from numpy.typing import NDArray
 import numpy as np
 from skimage.io import imread, imshow, imsave
@@ -43,8 +43,7 @@ NPlane: TypeAlias = Annotated[tuple[int | None, ...], "N-dim plane"]
 
 the `NPlane` specifies for each coordinate `i`, either a specific `int` index, or a `None`
 to dictate `slice(0, None)` (which is an unbound plane) for that `i`th dimension.
-use the `plane_to_slice` function convert from this from to a proper slice
-
+use the `plane_to_slice` function convert from this from to a proper slice.
 >>> arr: NDArray = np.zeros((2000, 512, 3), dtype=np.float32)
 >>> plane: NPlane = (1000, None, 1) # N = 3, nd-plane that can select `arr[1000, :, 1]`
 >>> sel: NSlice = plane_to_slice(plane) # = `(1000, slice(0, None None), 1)`
@@ -53,17 +52,15 @@ use the `plane_to_slice` function convert from this from to a proper slice
 2.0
 """
 
-PNCoords: TypeAlias = Annotated[
-	tuple[tuple[int, ...]]
-	| tuple[list[int]]
-	| tuple[NDArray[np.int_]],
-	"N-coordinate indexes of P-points"
-]
+PNCoords: TypeAlias = Annotated[tuple[
+	tuple[int, ...]
+	| list[int]
+	| NDArray[np.int_]
+], "N-coordinate indexes of P-points"]
 """N-coordinates indexes of P-points
 
 this can be typically used for masking ndarray. and it is also the return type of `np.where`.
-use the `points_to_coords` function to convert `PNPoints` to `PNCoords`, or use `coords_to_points` for vise versa
-
+use the `points_to_coords` function to convert `PNPoints` to `PNCoords`, or use `coords_to_points` for vise versa.
 >>> arr: NDArray = np.zeros((4, 4))
 >>> mask: PNCoords = ([0, 0, 1, 1], [0, 3, 2, 3]) # P = 4, N = 2. the 4 points are: (0, 0), (0, 3), (1, 2), (1, 3)
 >>> arr[mask] = 2
@@ -74,14 +71,31 @@ array([[2., 0., 0., 2.],
        [0., 0., 0., 0.]])
 """
 
-CoordIndex: TypeAlias = list[tuple[int, ...]]  # N-dimesional list of P-point coordinates in bundled in tuples (coordinate wise)
+PNCoordsPlane: TypeAlias = Annotated[tuple[
+	None
+	| tuple[int, ...]
+	| list[int]
+	| NDArray[np.int_]
+], "N-coordinate indexes of P-points on a hyper-plane"]
+"""N-coordinates indexes of P-points on a hyper-plane
+
+tuple of length `N`, each element consisting of either:
+ - `P` number of point-indexes of ith-coordinate
+ - or `None`, indicating a plane (unbound slice)
+
+for example: suppose you have `P = 7` points, and `N = 3` dimisional `image` of coordinates `[y, x, c]`.
+and you want to describe a collection of `PNCoordsPlane` at certain `x` and `y` coordinates, but not the
+color `c` coordinates, you'd describe it as:
+>>> important_pixel_coords: PNCoordsPlane = ([y0, y1, y2, y3, y4, y5, y6], [x0, x1, x2, x3, x4, x5, x6], None)
+"""
+
 PlantingCondition: TypeAlias = Callable[[NPoint, ValueAtPoint], bool]
 FloodFunc_kwargs = ParamSpec("FloodFunc_kwargs")
 FloodFunc = Callable[Concatenate[
 	Annotated[NDArray, "image ndarray"],
 	Annotated[NPoint, "point-index or slice of image"],
 	FloodFunc_kwargs
-], NDArray[np.uint8] | NDArray[np.bool8]]
+], NDArray[np.uint8] | NDArray[np.bool_]]
 
 
 def plane_to_slice(plane: NPlane) -> NSlice:
@@ -108,15 +122,71 @@ def coords_to_points(coords: PNCoords) -> PNPoints:
 	return list(zip(*coords))
 
 
+def coordsplane_to_slice_gen(coords: PNCoordsPlane) -> Iterator[NSlice]:
+	"""iterator for generating `P` number of `N` dimensional `NSlice`s based off of the provided `PNCoordsPlane`
+	`N-tuple` of `P-point` indexes, with the possibility of a certain dimension being `None`, indicating
+	and unbound plane slice.
+	>>> y0, y1, y2, y3, y4 = 1, 2, 3, 4, 5
+	>>> x0, x1, x2, x3, x4 = 9, 8, 7, 6, 5
+	>>> list(coordsplane_to_slice_gen((
+	>>>     [y0, y1, y2, y3, y4],
+	>>>     [x0, x1, x2, x3, x4],
+	>>>     None
+	>>> )))
+	[(1, 9, slice(0, None, None)),
+	 (2, 8, slice(0, None, None)),
+	 (3, 7, slice(0, None, None)),
+	 (4, 6, slice(0, None, None)),
+	 (5, 5, slice(0, None, None))]
+	"""
+	dims = len(coords)
+	number_of_points = min(*[len(coord_indexes) for coord_indexes in coords if coord_indexes is not None])
+	plane_dims: tuple[bool, ...] = tuple(True if coord_indexes is None else False for coord_indexes in coords)
+	plane_slice = slice(0, None)
+	for p in range(number_of_points):
+		yield tuple(
+			plane_slice if plane_dims[d]
+			else coords[d][p]
+			for d in range(dims)
+		)
+
+
+def coordsplane_to_reducedpoints_gen(coords: PNCoordsPlane) -> Iterator[NPoint]:
+	"""iterator for generating `P` number of `N - K` dimensional `NPoint`s based off of the provided `PNCoordsPlane`
+	`N-tuple` of `P-point` indexes. where `K` is the number of `None` dimensional indexes in the provided `PNCoordsPlane`,
+	which will get purged/reduced/nullified in the output `NPoint`.
+	>>> y0, y1, y2, y3, y4 = 1, 2, 3, 4, 5
+	>>> c0, c1, c2, c3, c4 = 0, 2, 2, 1, 2
+	>>> list(coordsplane_to_slice_gen((
+	>>>     [y0, y1, y2, y3, y4],
+	>>>     None
+	>>>     [c0, c1, c2, c3, c4],
+	>>> )))
+	[(1, 0),
+	 (2, 2),
+	 (3, 2),
+	 (4, 1),
+	 (5, 2)]
+	"""
+	dims = len(coords)
+	number_of_points = min(*[len(coord_indexes) for coord_indexes in coords if coord_indexes is not None])
+	null_dims: tuple[bool, ...] = tuple(True if coord_indexes is None else False for coord_indexes in coords)
+	for p in range(number_of_points):
+		yield tuple(
+			coords[d][p]
+			for d in range(dims)
+			if null_dims[d] is not None
+		)
+
+
 def flood_in_chunks(
 	image: Annotated[NDArray, "N-dim"],
 	seed_point: Annotated[tuple[int | None, ...], "N-point"],
 	condition: Callable[[NPoint, ValueAtPoint], bool],
 	*,
-	chunkshape: Optional[Annotated[tuple[int, ...], "N-dim shape"]] = None,
-	chunkoffset: Optional[Annotated[PointIndex, "N-dim point"]] = None,
-
-) -> NDArray[np.bool8]:
+	chunkshape: Optional[NShape] = None,
+	chunkoffset: Optional[NPoint] = None
+) -> NDArray[np.bool_]:
 	pass
 
 
@@ -126,7 +196,7 @@ def flood(
 	*, footprint: Annotated[NDArray, "N-dim"],
 	bigfootprint: int,
 	condition: Callable[[PointIndex, ValueAtPoint], bool]
-) -> NDArray[np.bool8]:
+) -> NDArray[np.bool_]:
 	pass
 
 
@@ -138,7 +208,7 @@ def flood_along_points(
 		Annotated[NDArray, "image ndarray"],
 		Annotated[NPoint, "point-index or slice of image"],
 		FloodFunc_kwargs
-	], NDArray[np.uint8] | NDArray[np.bool8]], "FloodFunc"],
+	], NDArray[np.uint8] | NDArray[np.bool_]], "FloodFunc"],
 	*args: FloodFunc_kwargs.args,
 	**kwargs: Annotated[FloodFunc_kwargs.kwargs, "flood_func.params.kwargs"]
 ):
@@ -184,16 +254,19 @@ def flood_along_points(
 		else [slice(0, None)] * n_points
 		for d in range(dims)
 	])
+	# =? coordsplane_to_slice_gen(seed_points)
 	selection_point_indexes: Iterable[tuple[int, ...]] = zip(*[
 		seed_points[d][0: n_points]
 		for d in range(dims)
 		if seed_points[d] is not None
 	])
+	# =? coordsplane_to_reducedpoints_gen(seed_points)
 	selection_shape: list[int] = [
 		image.shape[d]
 		for d in range(dims)
 		if seed_points[d] is not None
 	]
+	# =? coordsplane_to_reducedpoints_gen(image.shape)
 	selection = np.zeros(selection_shape, np.ubyte)
 	for img_p, sel_p in zip(point_indexes, selection_point_indexes):
 		if planting_condition(img_p, image[*img_p]) and selection[*sel_p] == 0:
