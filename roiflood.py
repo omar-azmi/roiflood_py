@@ -89,7 +89,7 @@ color `c` coordinates, you'd describe it as:
 >>> important_pixel_coords: PNCoordsPlane = ([y0, y1, y2, y3, y4, y5, y6], [x0, x1, x2, x3, x4, x5, x6], None)
 """
 
-PlantingCondition: TypeAlias = Callable[[NPoint, ValueAtPoint], bool]
+PlantingCondition: TypeAlias = Callable[[ValueAtPoint, NSlice], bool]
 FloodFunc_kwargs = ParamSpec("FloodFunc_kwargs")
 FloodFunc = Callable[Concatenate[
 	Annotated[NDArray, "image ndarray"],
@@ -146,7 +146,7 @@ def coordsplane_to_slice_gen(coords: PNCoordsPlane) -> Iterator[NSlice]:
 	for p in range(number_of_points):
 		yield tuple(
 			plane_slice if plane_dims[d]
-			else coords[d][p]
+			else coords[d][p]  # type: ignore
 			for d in range(dims)
 		)
 
@@ -173,7 +173,7 @@ def coordsplane_to_reducedpoints_gen(coords: PNCoordsPlane) -> Iterator[NPoint]:
 	null_dims: tuple[bool, ...] = tuple(True if coord_indexes is None else False for coord_indexes in coords)
 	for p in range(number_of_points):
 		yield tuple(
-			coords[d][p]
+			coords[d][p]  # type: ignore
 			for d in range(dims)
 			if null_dims[d] is not None
 		)
@@ -181,32 +181,32 @@ def coordsplane_to_reducedpoints_gen(coords: PNCoordsPlane) -> Iterator[NPoint]:
 
 def flood_in_chunks(
 	image: Annotated[NDArray, "N-dim"],
-	seed_point: Annotated[tuple[int | None, ...], "N-point"],
+	seed_point: NPlane,
 	condition: Callable[[NPoint, ValueAtPoint], bool],
 	*,
 	chunkshape: Optional[NShape] = None,
-	chunkoffset: Optional[NPoint] = None
+	chunkcenter: Optional[NPoint] = None
 ) -> NDArray[np.bool_]:
 	pass
 
 
 def flood(
 	image: Annotated[NDArray, "N-dim"],
-	seed_point: Annotated[tuple[int | None, ...], "N-point"],
+	seed_point: NPlane,
 	*, footprint: Annotated[NDArray, "N-dim"],
 	bigfootprint: int,
-	condition: Callable[[PointIndex, ValueAtPoint], bool]
+	condition: Callable[[NPoint, ValueAtPoint], bool]
 ) -> NDArray[np.bool_]:
 	pass
 
 
 def flood_along_points(
 	image: Annotated[NDArray, "N-dim"],
-	seed_points: Annotated[tuple[tuple[int, ...] | None, ...], "list of P-points of ith-coordinates"],
+	seed_points: PNCoordsPlane,
 	planting_condition: PlantingCondition,
 	flood_func: Annotated[Callable[Concatenate[
 		Annotated[NDArray, "image ndarray"],
-		Annotated[NPoint, "point-index or slice of image"],
+		Annotated[NSlice, "point-index or slice of image"],
 		FloodFunc_kwargs
 	], NDArray[np.uint8] | NDArray[np.bool_]], "FloodFunc"],
 	*args: FloodFunc_kwargs.args,
@@ -225,13 +225,10 @@ def flood_along_points(
 		and you want to place `seed_points` at `x` and `y` coordinates, but not the color `c` coordinates,
 		you'd define `seed_points` as:
 
-		`seed_points = [[y0, y1, y2, y3, y4, y5, y6], [x0, x1, x2, x3, x4, x5, x6], None]`
+		`seed_points = ([y0, y1, y2, y3, y4, y5, y6], [x0, x1, x2, x3, x4, x5, x6], None)`
 
-	planting_condition : ndarray, optional
-		The footprint (structuring element) used to determine the neighborhood
-		of each evaluated pixel. It must contain only 1's and 0's, have the
-		same number of dimensions as `image`. If not given, all adjacent pixels
-		are considered as part of the neighborhood (fully connected).
+	planting_condition : function (pixel_value, point_coords) -> bool
+		the condition function for deciding whether to plant or not
 
 	**kwargs : flood_func.params.kwargs, optional
 		see `kwargs` of your `flood_func`
@@ -247,29 +244,12 @@ def flood_along_points(
 	"""
 	dims = len(seed_points)
 	assert dims == image.ndim
-	n_points = np.min([len(coords) for coords in seed_points if coords is not None])
-	# seed_points2: list[tuple[int, ...]] = [seed_points[d][0: n_points] for d in range(dims) if seed_points[d] is not None]
-	point_indexes: Iterable[tuple[int | slice, ...]] = zip(*[
-		seed_points[d][0: n_points] if seed_points[d] is not None
-		else [slice(0, None)] * n_points
-		for d in range(dims)
-	])
-	# =? coordsplane_to_slice_gen(seed_points)
-	selection_point_indexes: Iterable[tuple[int, ...]] = zip(*[
-		seed_points[d][0: n_points]
-		for d in range(dims)
-		if seed_points[d] is not None
-	])
-	# =? coordsplane_to_reducedpoints_gen(seed_points)
-	selection_shape: list[int] = [
-		image.shape[d]
-		for d in range(dims)
-		if seed_points[d] is not None
-	]
-	# =? coordsplane_to_reducedpoints_gen(image.shape)
+	point_indexes: Iterable[tuple[int | slice, ...]] = coordsplane_to_slice_gen(seed_points)
+	selection_point_indexes: Iterable[tuple[int, ...]] = coordsplane_to_reducedpoints_gen(seed_points)
+	selection_shape: list[int] = [image.shape[d] for d in range(dims) if seed_points[d] is not None]
 	selection = np.zeros(selection_shape, np.ubyte)
 	for img_p, sel_p in zip(point_indexes, selection_point_indexes):
-		if planting_condition(img_p, image[*img_p]) and selection[*sel_p] == 0:
+		if planting_condition(image[*img_p], img_p) and selection[*sel_p] == 0:
 			# the `selection[*sel_p] == 0` condition insures that we are flood filling a region that has not already been touched yet
 			# this virtually eliminates redundant flood fills
 			selection |= flood_func(image, img_p, *args, **kwargs)
@@ -279,25 +259,27 @@ def flood_along_points(
 def linepath_coords(
 	flat_points:
 		Annotated[list[int], "[p0_x, p0_y, p0_z, p1_x, p1_y, p1_z, p2_x, p2_y, p2_z, ...]"]
-		| Annotated[list[list[int]], "[(p0_x, p0_y, p0_z), (p1_x, p1_y, p1_z), (p2_x, p2_y, p2_z), ... ]"],
+		| Annotated[PNPoints, "[(p0_x, p0_y, p0_z), (p1_x, p1_y, p1_z), (p2_x, p2_y, p2_z), ...]"],
 	dimensions: int
-) -> Annotated[list[NDArray[np.int32]], "[(p0_x, p0.1_x, p0.2_x, ..., p1_x, p1.1_x, ..., p2_x, p2.1_x, ...), (p0_y, p0.1_y, ...), (p0_z, p0.1_z, ...)]"]:
-	points: list[list[int]]
+) -> Annotated[PNCoords, "([p0_x, p0.1_x, p0.2_x, ..., p1_x, p1.1_x, ..., p2_x, p2.1_x, ...], [p0_y, p0.1_y, ...], [p0_z, p0.1_z, ...])"]:
+	points: PNPoints | list[list[int]]
 	if isinstance(flat_points[0], (int, float)):
 		# we've got to split the flat array of concatenated coords into an array of tuples of point-coords
-		points = [flat_points[i:i + dimensions] for i in range(0, len(flat_points) - dimensions + 1, dimensions)]
+		# flat_points: list[int]
+		points = [flat_points[i:i + dimensions] for i in range(0, len(flat_points) - dimensions + 1, dimensions)]  # type: ignore
 	else:
-		# flat_points is not actually flat, rather it's of the kind:
+		# flat_points is not actually flat, rather it's already of the kind:
 		# [(p0_x, p0_y, p0_z, ...), (p1_x, p1_y, p1_z, ...), (p2_x, p2_y, p2_z, ...), ... ]
 		# which is the exact format we wanted to convert our points to
-		points = flat_points
+		# flat_points: PNPoints
+		points = flat_points  # type: ignore
 	n_points = len(points)
-	line_coords: list[list[NDArray]] = [[] for d in range(dimensions)]
+	line_coords: list[list[NDArray[np.int_]]] = [[] for d in range(dimensions)]
 	for p in range(1, n_points):
 		this_line_coords: tuple[NDArray, ...] = line_nd(points[p - 1], points[p], endpoint=(p == n_points - 1))
 		for d in range(dimensions):
 			line_coords[d].append(this_line_coords[d])
-	line_coords_joined: list[NDArray[np.int32]] = [np.concatenate(line_coords[d]) for d in range(dimensions)]
+	line_coords_joined: tuple[NDArray[np.int_], ...] = tuple(np.concatenate(line_coords[d]) for d in range(dimensions))
 	return line_coords_joined
 
 
@@ -310,9 +292,9 @@ img = imread("./q2,n20-242.jpg")
 # flood_along_points(img, yxc_coords, seeding_condition, skflood, tolerance=5)
 
 yx_coords = linepath_coords(polygon_coords_yx, 2)
-selection0 = flood_along_points(img[:, :, 0], yx_coords, lambda yx, c: c > lower_color[0] and c < upper_color[0], skflood, tolerance=5)
-selection1 = flood_along_points(img[:, :, 1], yx_coords, lambda yx, c: c > lower_color[1] and c < upper_color[1], skflood, tolerance=5)
-selection2 = flood_along_points(img[:, :, 2], yx_coords, lambda yx, c: c > lower_color[2] and c < upper_color[2], skflood, tolerance=5)
+selection0 = flood_along_points(img[:, :, 0], yx_coords, lambda c, yxc: c > lower_color[0] and c < upper_color[0], skflood, tolerance=5)
+selection1 = flood_along_points(img[:, :, 1], yx_coords, lambda c, yxc: c > lower_color[1] and c < upper_color[1], skflood, tolerance=5)
+selection2 = flood_along_points(img[:, :, 2], yx_coords, lambda c, yxc: c > lower_color[2] and c < upper_color[2], skflood, tolerance=5)
 
 imshow(selection0 & selection1 & selection2)
 imsave("./roi.png", (selection0 & selection1 & selection2) * 255)
