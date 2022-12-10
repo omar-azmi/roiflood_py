@@ -95,7 +95,7 @@ FloodFunc = Callable[Concatenate[
 	Annotated[NDArray, "image ndarray"],
 	Annotated[NPoint, "point-index or slice of image"],
 	FloodFunc_kwargs
-], NDArray[np.uint8] | NDArray[np.bool_]]
+], NDArray[np.ubyte] | NDArray[np.bool_]]
 
 
 def plane_to_slice(plane: NPlane) -> NSlice:
@@ -179,15 +179,38 @@ def coordsplane_to_reducedpoints_gen(coords: PNCoordsPlane) -> Iterator[NPoint]:
 		)
 
 
+class NDArrayChunk:
+	pass
+
+
 def flood_in_chunks(
 	image: Annotated[NDArray, "N-dim"],
 	seed_point: NPlane,
-	condition: Callable[[NPoint, ValueAtPoint], bool],
+	condition: Callable[[ValueAtPoint, NPoint], bool],
 	*,
 	chunkshape: Optional[NShape] = None,
 	chunkcenter: Optional[NPoint] = None
 ) -> NDArray[np.bool_]:
 	pass
+
+
+YX = TypeAlias = tuple[int, int]
+YXC = TypeAlias = tuple[int, int, int]
+CAtPoint = ValueAtPoint
+
+def flood_in_2dchunks(
+	image: Annotated[NDArray, "3-dim"],
+	seed_point: YX,
+	condition: Callable[[CAtPoint, YX], bool],
+	*,
+	chunkshape: Optional[YX] = None,
+	chunkcenter: Optional[YX] = None
+) -> NDArray[np.bool_]:
+	chunkshape = chunkshape or tuple(32 for d in range(len(seed_point)))
+	chunkcenter = chunkcenter or tuple(s // 2 for s in chunkshape)
+	
+	
+
 
 
 def flood(
@@ -208,7 +231,7 @@ def flood_along_points(
 		Annotated[NDArray, "image ndarray"],
 		Annotated[NSlice, "point-index or slice of image"],
 		FloodFunc_kwargs
-	], NDArray[np.uint8] | NDArray[np.bool_]], "FloodFunc"],
+	], NDArray[np.ubyte] | NDArray[np.bool_]], "FloodFunc"],
 	*args: FloodFunc_kwargs.args,
 	**kwargs: Annotated[FloodFunc_kwargs.kwargs, "flood_func.params.kwargs"]
 ):
