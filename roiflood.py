@@ -1,7 +1,7 @@
 """provides tools for selecting region-of-interest (roi) on PIL images"""
 __version__ = "0.1.0"
 
-from typing import Any, ParamSpecKwargs, Callable, Concatenate, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
+from typing import Any, Optional, Generic, Callable, Concatenate, Iterable, Literal, NamedTuple, NewType, ParamSpec, Self, Tuple, TypeAlias, TypeVarTuple, Annotated, Dict, TypeVar
 from numpy.typing import NDArray
 import numpy as np
 from skimage.io import imread, imshow, imsave
@@ -9,34 +9,138 @@ from skimage.draw import line_nd
 from skimage.segmentation import flood as skflood
 
 
-def flood(
+ValueAtPoint: TypeAlias = int | NDArray
+
+NPoint: TypeAlias = Annotated[tuple[int, ...], "N-dim point"]
+"""N-dimesional point
+>>> x0, y0, z0 = 8, 1, 2
+>>> p: NPoint = (x0, y0, z0) # N = 3
+"""
+
+PNPoints: TypeAlias = Annotated[list[NPoint], "P-points of N-dim"]
+"""list of P points, each of N-dimesions
+>>> points: PNPoints = [(0, 0,), (1, 0,), (1, 5,), (2, 3,)] # P = 4, N = 2
+"""
+
+NShape: TypeAlias = Annotated[tuple[int, ...], "N-dim shape"]
+"""N-dimesional shape
+>>> width, height, depth = 2000, 512, 3
+>>> s: NShape = (width, height, depth) # N = 3
+>>> arr: NDArray = np.zeros(s, dtype=np.float32)
+"""
+
+NSlice: TypeAlias = Annotated[tuple[int | slice, ...], "N-dim slice"]
+"""N-dimesional slice
+>>> arr: NDArray = np.zeros((2000, 512, 3), dtype=np.float32)
+>>> sel: NSlice = (1000, 255, slice(1, None)) # N = 3, nd-slice for selecting `arr[1000, 255, 1:]`
+>>> arr[*sel] = 123.4
+>>> arr[1000, 255]
+array([  0. , 123.4, 123.4], dtype=float32)
+"""
+
+NPlane: TypeAlias = Annotated[tuple[int | None, ...], "N-dim plane"]
+"""N-dimesional hyper-plane
+
+the `NPlane` specifies for each coordinate `i`, either a specific `int` index, or a `None`
+to dictate `slice(0, None)` (which is an unbound plane) for that `i`th dimension.
+use the `plane_to_slice` function convert from this from to a proper slice
+
+>>> arr: NDArray = np.zeros((2000, 512, 3), dtype=np.float32)
+>>> plane: NPlane = (1000, None, 1) # N = 3, nd-plane that can select `arr[1000, :, 1]`
+>>> sel: NSlice = plane_to_slice(plane) # = `(1000, slice(0, None None), 1)`
+>>> arr[*sel] = 2.0
+>>> arr[1000, 0, 1]
+2.0
+"""
+
+PNCoords: TypeAlias = Annotated[
+	tuple[tuple[int, ...]]
+	| tuple[list[int]]
+	| tuple[NDArray[np.int_]],
+	"N-coordinate indexes of P-points"
+]
+"""N-coordinates indexes of P-points
+
+this can be typically used for masking ndarray. and it is also the return type of `np.where`.
+use the `points_to_coords` function to convert `PNPoints` to `PNCoords`, or use `coords_to_points` for vise versa
+
+>>> arr: NDArray = np.zeros((4, 4))
+>>> mask: PNCoords = ([0, 0, 1, 1], [0, 3, 2, 3]) # P = 4, N = 2. the 4 points are: (0, 0), (0, 3), (1, 2), (1, 3)
+>>> arr[mask] = 2
+>>> arr
+array([[2., 0., 0., 2.],
+       [0., 0., 2., 2.],
+       [0., 0., 0., 0.],
+       [0., 0., 0., 0.]])
+"""
+
+CoordIndex: TypeAlias = list[tuple[int, ...]]  # N-dimesional list of P-point coordinates in bundled in tuples (coordinate wise)
+PlantingCondition: TypeAlias = Callable[[NPoint, ValueAtPoint], bool]
+FloodFunc_kwargs = ParamSpec("FloodFunc_kwargs")
+FloodFunc = Callable[Concatenate[
+	Annotated[NDArray, "image ndarray"],
+	Annotated[NPoint, "point-index or slice of image"],
+	FloodFunc_kwargs
+], NDArray[np.uint8] | NDArray[np.bool8]]
+
+
+def plane_to_slice(plane: NPlane) -> NSlice:
+	"""convert an `NPlane` to an `NSlice`
+	>>> plane_to_slice((1000, None, 0,))
+	(1000, slice(0, None, None), 0)
+	"""
+	return tuple(p if p is not None else slice(0, None) for p in plane)
+
+
+def points_to_coords(points: PNPoints) -> PNCoords:
+	"""convert a `PNPoints` list of points to a `PNCoords` tuple of coordinates
+	>>> points_to_coords([(0, 0), (0, 3), (1, 2), (1, 3)])
+	((0, 0, 1, 1), (0, 3, 2, 3))
+	"""
+	return tuple(zip(*points))
+
+
+def coords_to_points(coords: PNCoords) -> PNPoints:
+	"""convert a `PNCoords` tuple of coordinates to a `PNPoints` list of points
+	>>> coords_to_points(([0, 0, 1, 1], [0, 3, 2, 3]))
+	[(0, 0), (0, 3), (1, 2), (1, 3)]
+	"""
+	return list(zip(*coords))
+
+
+def flood_in_chunks(
 	image: Annotated[NDArray, "N-dim"],
 	seed_point: Annotated[tuple[int | None, ...], "N-point"],
-	*, footprint: Annotated[NDArray, "N-dim"] | None = None,
-	connectivity: float | None = None,
-	tolerance: float | None = None
-) -> NDArray[bool]:
+	condition: Callable[[NPoint, ValueAtPoint], bool],
+	*,
+	chunkshape: Optional[Annotated[tuple[int, ...], "N-dim shape"]] = None,
+	chunkoffset: Optional[Annotated[PointIndex, "N-dim point"]] = None,
+
+) -> NDArray[np.bool8]:
 	pass
 
 
-ValueAtPoint: TypeAlias = int | NDArray
-PointIndex: TypeAlias = tuple[int, ...]  # N-dimesional point
-CoordIndex: TypeAlias = list[tuple[int, ...]]  # N-dimesional list of P-point coordinates in bundled in tuples (coordinate wise)
-PlantingCondition: TypeAlias = Callable[[PointIndex, ValueAtPoint], bool]
-FloodFunc_kwargs = ParamSpec("FloodFunc_kwargs")
-FloodFunc: TypeAlias = Callable[Concatenate[
-	Annotated[NDArray, "image ndarray"],
-	Annotated[PointIndex, "point-index or slice of image"],
-	FloodFunc_kwargs
-], NDArray[np.uint8] | NDArray[np.bool8]]
+def flood(
+	image: Annotated[NDArray, "N-dim"],
+	seed_point: Annotated[tuple[int | None, ...], "N-point"],
+	*, footprint: Annotated[NDArray, "N-dim"],
+	bigfootprint: int,
+	condition: Callable[[PointIndex, ValueAtPoint], bool]
+) -> NDArray[np.bool8]:
+	pass
 
 
 def flood_along_points(
 	image: Annotated[NDArray, "N-dim"],
 	seed_points: Annotated[tuple[tuple[int, ...] | None, ...], "list of P-points of ith-coordinates"],
 	planting_condition: PlantingCondition,
-	flood_func: FloodFunc,
-	**kwargs: Annotated[FloodFunc_kwargs, "flood_func.params.kwargs"]
+	flood_func: Annotated[Callable[Concatenate[
+		Annotated[NDArray, "image ndarray"],
+		Annotated[NPoint, "point-index or slice of image"],
+		FloodFunc_kwargs
+	], NDArray[np.uint8] | NDArray[np.bool8]], "FloodFunc"],
+	*args: FloodFunc_kwargs.args,
+	**kwargs: Annotated[FloodFunc_kwargs.kwargs, "flood_func.params.kwargs"]
 ):
 	"""_summary_
 
@@ -93,7 +197,9 @@ def flood_along_points(
 	selection = np.zeros(selection_shape, np.ubyte)
 	for img_p, sel_p in zip(point_indexes, selection_point_indexes):
 		if planting_condition(img_p, image[*img_p]) and selection[*sel_p] == 0:
-			selection |= flood_func(image, img_p, **kwargs)
+			# the `selection[*sel_p] == 0` condition insures that we are flood filling a region that has not already been touched yet
+			# this virtually eliminates redundant flood fills
+			selection |= flood_func(image, img_p, *args, **kwargs)
 	return selection
 
 
@@ -125,33 +231,15 @@ def linepath_coords(
 polygon_coords_yx = [3100, 180, 3950, 1130, 3920, 1740, 3670, 1900]
 upper_color = [200, 200, 200]
 lower_color = [180, 180, 180]
-
-
-def seeding_condition(yx: tuple[int, int], color: tuple[int, int, int]):
-	if np.all(np.greater(color, lower_color)) and np.all(np.greater(upper_color, color)):
-		return True
-	return False
-
-
-def seeding_condition2(yx: tuple[int, int], color: int):
-	if color > 180 and color < 200:
-		return True
-	return False
-
-
 img = imread("./q2,n20-242.jpg")
 
 # yxc_coords: list[NDArray[np.int32] | None] = linepath_coords(polygon_coords_yx, 2) + [None,]
 # flood_along_points(img, yxc_coords, seeding_condition, skflood, tolerance=5)
-yx_coords = linepath_coords(polygon_coords_yx, 2)
-selection0 = flood_along_points(img[:, :, 0], yx_coords, seeding_condition2, skflood, tolerance=5)
-selection1 = flood_along_points(img[:, :, 1], yx_coords, seeding_condition2, skflood, tolerance=5)
-selection2 = flood_along_points(img[:, :, 2], yx_coords, seeding_condition2, skflood, tolerance=5)
 
-for y, x in zip(rr, cc):
-	if seeding_condition(y, x, img[y, x]) and selection[y, x] == 0:
-		count += 1
-		selection |= flood(img[:, :, 0], (y, x), tolerance=5) & flood(img[:, :, 1], (y, x), tolerance=5) & flood(img[:, :, 2], (y, x), tolerance=5)
+yx_coords = linepath_coords(polygon_coords_yx, 2)
+selection0 = flood_along_points(img[:, :, 0], yx_coords, lambda yx, c: c > lower_color[0] and c < upper_color[0], skflood, tolerance=5)
+selection1 = flood_along_points(img[:, :, 1], yx_coords, lambda yx, c: c > lower_color[1] and c < upper_color[1], skflood, tolerance=5)
+selection2 = flood_along_points(img[:, :, 2], yx_coords, lambda yx, c: c > lower_color[2] and c < upper_color[2], skflood, tolerance=5)
 
 imshow(selection0 & selection1 & selection2)
-imsave("./roi.png", selection0 & selection1 & selection2)
+imsave("./roi.png", (selection0 & selection1 & selection2) * 255)
